@@ -1,4 +1,4 @@
-module bottle
+module github.com/clarktrimble/bottle
 
 go 1.23.3
 

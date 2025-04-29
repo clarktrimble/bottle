@@ -48,20 +48,6 @@ func New(factory NewRecord, path string, lgr Logger) (bottle *Bottle, err error)
 	return
 }
 
-// Flush recreates buckets, deleting all records.
-func (bottle *Bottle) Flush() (err error) {
-
-	// Todo: all within a single tx plz
-
-	err = bottle.deleteBuckets()
-	if err != nil {
-		return
-	}
-
-	err = bottle.touchBuckets()
-	return
-}
-
 // Close closes.
 func (bottle *Bottle) Close() error {
 	return bottle.db.Close()
@@ -137,18 +123,49 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (count int, 
 	return
 }
 
+// Flush recreates buckets, deleting all records.
+func (bottle *Bottle) Flush() (err error) {
+
+	// Todo: all within a single tx plz
+
+	err = bottle.deleteBuckets()
+	if err != nil {
+		return
+	}
+
+	err = bottle.touchBuckets()
+	return
+}
+
+// Get gets a record.
+func (bottle *Bottle) Get(id []byte) (record Record, err error) {
+
+	err = bottle.db.View(func(tx *bbolt.Tx) error {
+
+		bucket, err := recordBucket(tx)
+		if err != nil {
+			return err
+		}
+
+		record, err = bottle.get(bucket, id)
+		return err // hopefully nil!
+	})
+
+	return
+}
+
 // All gets all records.
 func (bottle *Bottle) All() (records []Record, err error) {
 
 	records = []Record{}
 	err = bottle.db.View(func(tx *bbolt.Tx) error {
 
-		recordBucket, _, err := buckets(tx)
+		bucket, err := recordBucket(tx)
 		if err != nil {
 			return err
 		}
 
-		cursor := recordBucket.Cursor()
+		cursor := bucket.Cursor()
 		for key, data := cursor.First(); key != nil; key, data = cursor.Next() {
 
 			record, err := bottle.factory(data)
@@ -225,13 +242,25 @@ func expire(bucket *bbolt.Bucket, cursor *bbolt.Cursor, key, id []byte, co time.
 	return
 }
 
-func buckets(tx *bbolt.Tx) (recordBucket, indexBucket *bbolt.Bucket, err error) {
+func recordBucket(tx *bbolt.Tx) (bucket *bbolt.Bucket, err error) {
 
-	recordBucket = tx.Bucket([]byte(recordBucketName))
-	indexBucket = tx.Bucket([]byte(indexBucketName))
+	bucket = tx.Bucket([]byte(recordBucketName))
+	if bucket == nil {
+		err = errors.Errorf("bucket not found: %s", recordBucketName)
+	}
+	return
+}
 
-	if recordBucket == nil || indexBucket == nil {
-		err = errors.Errorf("bucket(s) not found: %s, %s", recordBucketName, indexBucketName)
+func buckets(tx *bbolt.Tx) (record, index *bbolt.Bucket, err error) {
+
+	record, err = recordBucket(tx)
+	if err != nil {
+		return
+	}
+
+	index = tx.Bucket([]byte(indexBucketName))
+	if index == nil {
+		err = errors.Errorf("bucket not found: %s", indexBucketName)
 	}
 	return
 }

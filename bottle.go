@@ -8,7 +8,6 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// Todo: a-a-and unit test this mofo!!
 // Todo: clean up any garbage in db on open
 
 const (

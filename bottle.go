@@ -90,7 +90,7 @@ func (bottle *Bottle) Upsert(ctx context.Context, record Record) (newRecord bool
 }
 
 // Expire deletes old records.
-func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (count int, err error) {
+func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (expired []Record, err error) {
 
 	err = bottle.db.Update(func(tx *bbolt.Tx) error {
 
@@ -105,7 +105,7 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (count int, 
 
 		for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
 
-			finished, err := expire(recordBucket, cursor, key, id, before)
+			data, finished, err := expire(recordBucket, cursor, key, id, before)
 			if err != nil {
 				bottle.logger.Error(ctx, "error expiring record", err)
 				continue
@@ -114,7 +114,12 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (count int, 
 				break
 			}
 
-			count++
+			record, err := bottle.factory(data)
+			if err != nil {
+				bottle.logger.Error(ctx, "error rehydrating expired record", err)
+				continue
+			}
+			expired = append(expired, record)
 		}
 
 		return nil
@@ -214,7 +219,7 @@ func add(recordBucket, indexBucket *bbolt.Bucket, record Record) (err error) {
 	return
 }
 
-func expire(bucket *bbolt.Bucket, cursor *bbolt.Cursor, key, id []byte, co time.Time) (fin bool, err error) {
+func expire(bucket *bbolt.Bucket, cursor *bbolt.Cursor, key, id []byte, co time.Time) (expired []byte, fin bool, err error) {
 
 	err = validateIdx(key, id)
 	if err != nil {
@@ -223,6 +228,12 @@ func expire(bucket *bbolt.Bucket, cursor *bbolt.Cursor, key, id []byte, co time.
 
 	if after(key, co) {
 		fin = true
+		return
+	}
+
+	expired = bucket.Get(id)
+	if expired == nil {
+		err = errors.Errorf("no data for expired record with id: %s", id)
 		return
 	}
 

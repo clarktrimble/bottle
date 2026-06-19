@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,6 +154,50 @@ var _ = Describe("Bottle", func() {
 		})
 	})
 
+	Describe("getting records since a time", func() {
+		When("records exist at and after the cutoff", func() {
+			BeforeEach(func() {
+				record002, _ := mockFactory([]byte("002"))
+				_, _ = btl.Upsert(ctx, record002)
+				record004, _ := mockFactory([]byte("004"))
+				_, _ = btl.Upsert(ctx, record004)
+				record003, _ := mockFactory([]byte("003"))
+				_, _ = btl.Upsert(ctx, record003)
+			})
+
+			It("returns records inclusively, oldest first", func() {
+				records, err := btl.Since(ctx, baseTime.Add(3*time.Minute))
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(2))
+				Expect(records[0].Id()).To(Equal("test003"))
+				Expect(records[1].Id()).To(Equal("test004"))
+			})
+		})
+
+		When("a record has been updated", func() {
+			BeforeEach(func() {
+				btl.Close()
+				btl, err = New(encodedFactory, path, nil)
+				Expect(err).ToNot(HaveOccurred())
+
+				_, err = btl.Upsert(ctx, &encodedRecord{id: "same", minute: 1})
+				Expect(err).ToNot(HaveOccurred())
+				_, err = btl.Upsert(ctx, &encodedRecord{id: "same", minute: 5})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("uses the current timestamp, not history", func() {
+				records, err := btl.Since(ctx, baseTime)
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(1))
+				Expect(records[0].Id()).To(Equal("same"))
+				Expect(records[0].Ts()).To(Equal(baseTime.Add(5 * time.Minute)))
+			})
+		})
+	})
+
 	Describe("expiring records", func() {
 		var (
 			expired []Record
@@ -187,6 +232,40 @@ var _ = Describe("Bottle", func() {
 var (
 	baseTime = time.Unix(0, 0).UTC()
 )
+
+type encodedRecord struct {
+	id     string
+	minute int
+}
+
+func (record *encodedRecord) Id() string {
+	return record.id
+}
+
+func (record *encodedRecord) Ts() time.Time {
+	return baseTime.Add(time.Duration(record.minute) * time.Minute)
+}
+
+func (record *encodedRecord) Encode() ([]byte, error) {
+	return []byte(fmt.Sprintf("%s:%d", record.id, record.minute)), nil
+}
+
+var encodedFactory = func(data []byte) (record Record, err error) {
+	parts := strings.Split(string(data), ":")
+	if len(parts) != 2 {
+		err = errors.Errorf("encodedFactory wants id:minute, got: %s", data)
+		return
+	}
+
+	minute, err := strconv.Atoi(parts[1])
+	if err != nil {
+		err = errors.Wrapf(err, "failed to parse minute: %s", parts[1])
+		return
+	}
+
+	record = &encodedRecord{id: parts[0], minute: minute}
+	return
+}
 
 var mockFactory = func(data []byte) (record Record, err error) {
 

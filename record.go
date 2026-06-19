@@ -23,15 +23,15 @@ func idb(record Record) []byte {
 	return []byte(record.Id())
 }
 
-func tsm(record Record) int64 {
-	return record.Ts().UnixMilli()
+func tsb(timestamp time.Time) []byte {
+	// Todo: consider sortable int64 encoding if pre-epoch timestamps matter.
+	tsBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(tsBytes, uint64(timestamp.UnixMilli()))
+	return tsBytes
 }
 
 func idx(record Record) []byte {
-	// Todo: consider sortable int64 encoding if pre-epoch timestamps matter.
-	tsBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(tsBytes, uint64(tsm(record)))
-	return append(tsBytes, idb(record)...)
+	return append(tsb(record.Ts()), idb(record)...)
 }
 
 func validateIdx(key, id []byte) error {

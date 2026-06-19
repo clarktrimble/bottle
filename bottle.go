@@ -153,6 +153,46 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (expired []R
 	return
 }
 
+// Since gets records touched at or after a time, oldest first.
+func (bottle *Bottle) Since(ctx context.Context, after time.Time) (records []Record, err error) {
+
+	records = []Record{}
+	err = bottle.db.View(func(tx *bbolt.Tx) error {
+
+		recordBucket, indexBucket, err := buckets(tx)
+		if err != nil {
+			return err
+		}
+
+		cursor := indexBucket.Cursor()
+		for key, id := cursor.Seek(tsb(after)); key != nil; key, id = cursor.Next() {
+
+			err = validateIdx(key, id)
+			if err != nil {
+				bottle.logger.Error(ctx, "error reading record index", err)
+				continue
+			}
+
+			data := recordBucket.Get(id)
+			if data == nil {
+				bottle.logger.Error(ctx, "error reading record", errors.Errorf("no data for record with id: %s", id))
+				continue
+			}
+
+			record, err := bottle.hydrate(data)
+			if err != nil {
+				bottle.logger.Error(ctx, "error rehydrating record", err)
+				continue
+			}
+			records = append(records, record)
+		}
+
+		return nil
+	})
+
+	return
+}
+
 // Flush recreates buckets, deleting all records.
 func (bottle *Bottle) Flush() (err error) {
 
@@ -218,7 +258,7 @@ func (bottle *Bottle) All() (records []Record, err error) {
 		cursor := bucket.Cursor()
 		for key, data := cursor.First(); key != nil; key, data = cursor.Next() {
 
-			record, err := bottle.factory(slices.Clone(data))
+			record, err := bottle.hydrate(data)
 			if err != nil {
 				return err
 			}
@@ -233,6 +273,10 @@ func (bottle *Bottle) All() (records []Record, err error) {
 
 // unexported
 
+func (bottle *Bottle) hydrate(data []byte) (Record, error) {
+	return bottle.factory(slices.Clone(data))
+}
+
 func (bottle *Bottle) get(recordBucket *bbolt.Bucket, idb []byte) (record Record, err error) {
 
 	data := recordBucket.Get(idb)
@@ -240,7 +284,7 @@ func (bottle *Bottle) get(recordBucket *bbolt.Bucket, idb []byte) (record Record
 		return
 	}
 
-	record, err = bottle.factory(slices.Clone(data))
+	record, err = bottle.hydrate(data)
 	return
 }
 

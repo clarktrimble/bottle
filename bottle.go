@@ -153,6 +153,50 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (expired []R
 	return
 }
 
+// Before gets records with timestamp before cutoff, oldest first.
+// It does not delete.
+func (bottle *Bottle) Before(ctx context.Context, before time.Time) (records []Record, err error) {
+
+	records = []Record{}
+	err = bottle.db.View(func(tx *bbolt.Tx) error {
+
+		recordBucket, indexBucket, err := buckets(tx)
+		if err != nil {
+			return err
+		}
+
+		cursor := indexBucket.Cursor()
+		for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
+
+			err = validateIdx(key, id)
+			if err != nil {
+				bottle.logger.Error(ctx, "error reading record index", err)
+				continue
+			}
+			if !beforeIdx(key, before) {
+				break
+			}
+
+			data := recordBucket.Get(id)
+			if data == nil {
+				bottle.logger.Error(ctx, "error reading record", errors.Errorf("no data for record with id: %s", id))
+				continue
+			}
+
+			record, err := bottle.hydrate(data)
+			if err != nil {
+				bottle.logger.Error(ctx, "error rehydrating record", err)
+				continue
+			}
+			records = append(records, record)
+		}
+
+		return nil
+	})
+
+	return
+}
+
 // Since gets records touched at or after a time, oldest first.
 func (bottle *Bottle) Since(ctx context.Context, after time.Time) (records []Record, err error) {
 
@@ -193,6 +237,76 @@ func (bottle *Bottle) Since(ctx context.Context, after time.Time) (records []Rec
 	return
 }
 
+// Sweep walks records with timestamp before cutoff, oldest first.
+//
+// With a nil sweeper, Sweep deletes matching records without decoding them.
+// With a non-nil sweeper, Sweep decodes each matching record and calls sweeper
+// inside a single write transaction. If sweeper returns nil, the record remains
+// deleted. If sweeper returns a replacement record, Sweep writes the replacement.
+// Any sweeper error aborts and rolls back the transaction.
+//
+// The sweeper must not call bottle again.
+func (bottle *Bottle) Sweep(
+	ctx context.Context,
+	before time.Time,
+	sweeper func(record Record) (replacement Record, err error),
+) (err error) {
+
+	err = bottle.db.Update(func(tx *bbolt.Tx) error {
+
+		recordBucket, indexBucket, err := buckets(tx)
+		if err != nil {
+			return err
+		}
+
+		if sweeper == nil {
+			return deleteExpired(recordBucket, indexBucket, before)
+		}
+
+		entries, err := expiredEntries(recordBucket, indexBucket, before)
+		if err != nil {
+			return err
+		}
+
+		for _, entry := range entries {
+			record, err := bottle.hydrate(entry.data)
+			if err != nil {
+				err = errors.Wrapf(err, "failed to rehydrate expired record, id: %s", entry.id)
+				return err
+			}
+
+			replacement, err := sweeper(record)
+			if err != nil {
+				err = errors.Wrapf(err, "failed to sweep expired record, id: %s", entry.id)
+				return err
+			}
+
+			err = recordBucket.Delete(entry.id)
+			if err != nil {
+				err = errors.Wrapf(err, "failed to delete record, id: %s", entry.id)
+				return err
+			}
+
+			err = indexBucket.Delete(entry.key)
+			if err != nil {
+				err = errors.Wrapf(err, "failed to delete index, id: %s", entry.id)
+				return err
+			}
+
+			if replacement != nil {
+				err = add(recordBucket, indexBucket, replacement)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		return nil
+	})
+
+	return
+}
+
 // Flush recreates buckets, deleting all records.
 func (bottle *Bottle) Flush() (err error) {
 
@@ -225,6 +339,42 @@ func (bottle *Bottle) Flush() (err error) {
 
 		return nil
 	})
+}
+
+// Delete removes one record by id.
+func (bottle *Bottle) Delete(ctx context.Context, id []byte) (err error) {
+
+	err = bottle.db.Update(func(tx *bbolt.Tx) error {
+
+		recordBucket, indexBucket, err := buckets(tx)
+		if err != nil {
+			return err
+		}
+
+		record, err := bottle.get(recordBucket, id)
+		if err != nil {
+			return err
+		}
+		if record == nil {
+			return nil
+		}
+
+		err = recordBucket.Delete(id)
+		if err != nil {
+			err = errors.Wrapf(err, "failed to delete record, id: %s", id)
+			return err
+		}
+
+		err = indexBucket.Delete(idx(record))
+		if err != nil {
+			err = errors.Wrapf(err, "failed to delete index, id: %s", id)
+			return err
+		}
+
+		return nil
+	})
+
+	return
 }
 
 // Get gets a record.
@@ -272,6 +422,70 @@ func (bottle *Bottle) All() (records []Record, err error) {
 }
 
 // unexported
+
+type expiredEntry struct {
+	key  []byte
+	id   []byte
+	data []byte
+}
+
+func expiredEntries(recordBucket, indexBucket *bbolt.Bucket, cutoff time.Time) (entries []expiredEntry, err error) {
+
+	cursor := indexBucket.Cursor()
+	for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
+
+		err = validateIdx(key, id)
+		if err != nil {
+			return
+		}
+		if !beforeIdx(key, cutoff) {
+			break
+		}
+
+		data := recordBucket.Get(id)
+		if data == nil {
+			err = errors.Errorf("no data for expired record with id: %s", id)
+			return
+		}
+
+		entries = append(entries, expiredEntry{
+			key:  slices.Clone(key),
+			id:   slices.Clone(id),
+			data: slices.Clone(data),
+		})
+	}
+
+	return
+}
+
+func deleteExpired(recordBucket, indexBucket *bbolt.Bucket, cutoff time.Time) (err error) {
+
+	cursor := indexBucket.Cursor()
+	for key, id := cursor.First(); key != nil; key, id = cursor.Next() {
+
+		err = validateIdx(key, id)
+		if err != nil {
+			return
+		}
+		if !beforeIdx(key, cutoff) {
+			break
+		}
+
+		err = recordBucket.Delete(id)
+		if err != nil {
+			err = errors.Wrapf(err, "failed to delete record, id: %s", id)
+			return
+		}
+
+		err = cursor.Delete()
+		if err != nil {
+			err = errors.Wrapf(err, "failed to delete index, id: %s", id)
+			return
+		}
+	}
+
+	return
+}
 
 func (bottle *Bottle) hydrate(data []byte) (Record, error) {
 	return bottle.factory(slices.Clone(data))

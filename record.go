@@ -49,6 +49,12 @@ func validateIdx(key, id []byte) error {
 	return nil
 }
 
+func beforeIdx(key []byte, cutoff time.Time) bool {
+
+	ts := int64(binary.BigEndian.Uint64(key[0:8]))
+	return ts < cutoff.UnixMilli()
+}
+
 func after(key []byte, cutoff time.Time) bool {
 
 	ts := int64(binary.BigEndian.Uint64(key[0:8]))

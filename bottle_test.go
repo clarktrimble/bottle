@@ -154,6 +154,36 @@ var _ = Describe("Bottle", func() {
 		})
 	})
 
+	Describe("getting records before a time", func() {
+		When("records exist before and at the cutoff", func() {
+			BeforeEach(func() {
+				record002, _ := mockFactory([]byte("002"))
+				_, _ = btl.Upsert(ctx, record002)
+				record004, _ := mockFactory([]byte("004"))
+				_, _ = btl.Upsert(ctx, record004)
+				record003, _ := mockFactory([]byte("003"))
+				_, _ = btl.Upsert(ctx, record003)
+			})
+
+			It("returns records strictly before the cutoff, oldest first", func() {
+				records, err := btl.Before(ctx, baseTime.Add(3*time.Minute))
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(1))
+				Expect(records[0].Id()).To(Equal("test002"))
+			})
+
+			It("does not delete records", func() {
+				_, err := btl.Before(ctx, baseTime.Add(3*time.Minute))
+				Expect(err).ToNot(HaveOccurred())
+
+				records, err := btl.All()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(3))
+			})
+		})
+	})
+
 	Describe("getting records since a time", func() {
 		When("records exist at and after the cutoff", func() {
 			BeforeEach(func() {
@@ -194,6 +224,127 @@ var _ = Describe("Bottle", func() {
 				Expect(records).To(HaveLen(1))
 				Expect(records[0].Id()).To(Equal("same"))
 				Expect(records[0].Ts()).To(Equal(baseTime.Add(5 * time.Minute)))
+			})
+		})
+	})
+
+	Describe("deleting records", func() {
+		When("the record exists", func() {
+			BeforeEach(func() {
+				record002, _ := mockFactory([]byte("002"))
+				_, _ = btl.Upsert(ctx, record002)
+				_, _ = btl.Upsert(ctx, record001)
+			})
+
+			It("removes the record and its index", func() {
+				err := btl.Delete(ctx, []byte("test001"))
+
+				Expect(err).ToNot(HaveOccurred())
+
+				record, err := btl.Get([]byte("test001"))
+				Expect(err).ToNot(HaveOccurred())
+				Expect(record).To(BeNil())
+
+				records, err := btl.Since(ctx, baseTime)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(1))
+				Expect(records[0].Id()).To(Equal("test002"))
+			})
+		})
+
+		When("the record does not exist", func() {
+			It("does not error", func() {
+				err := btl.Delete(ctx, []byte("missing"))
+
+				Expect(err).ToNot(HaveOccurred())
+			})
+		})
+	})
+
+	Describe("sweeping records", func() {
+		When("the sweeper is nil", func() {
+			BeforeEach(func() {
+				record002, _ := mockFactory([]byte("002"))
+				_, _ = btl.Upsert(ctx, record002)
+				record004, _ := mockFactory([]byte("004"))
+				_, _ = btl.Upsert(ctx, record004)
+			})
+
+			It("deletes swept records", func() {
+				err := btl.Sweep(ctx, baseTime.Add(3*time.Minute), nil)
+
+				Expect(err).ToNot(HaveOccurred())
+
+				records, err := btl.All()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(1))
+				Expect(records[0].Id()).To(Equal("test004"))
+			})
+		})
+
+		When("the callback returns nil replacements", func() {
+			BeforeEach(func() {
+				record002, _ := mockFactory([]byte("002"))
+				_, _ = btl.Upsert(ctx, record002)
+				record004, _ := mockFactory([]byte("004"))
+				_, _ = btl.Upsert(ctx, record004)
+			})
+
+			It("expires records without replacing them", func() {
+				err := btl.Sweep(ctx, baseTime.Add(3*time.Minute), func(record Record) (Record, error) {
+					return nil, nil
+				})
+
+				Expect(err).ToNot(HaveOccurred())
+
+				records, err := btl.All()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(1))
+				Expect(records[0].Id()).To(Equal("test004"))
+			})
+		})
+
+		When("the callback returns a replacement", func() {
+			BeforeEach(func() {
+				btl.Close()
+				btl, err = New(encodedFactory, path, nil)
+				Expect(err).ToNot(HaveOccurred())
+
+				_, err = btl.Upsert(ctx, &encodedRecord{id: "same", minute: 1})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("writes the replacement in the same sweep", func() {
+				err := btl.Sweep(ctx, baseTime.Add(3*time.Minute), func(record Record) (Record, error) {
+					return &encodedRecord{id: record.Id(), minute: 5}, nil
+				})
+
+				Expect(err).ToNot(HaveOccurred())
+
+				records, err := btl.Since(ctx, baseTime)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(1))
+				Expect(records[0].Id()).To(Equal("same"))
+				Expect(records[0].Ts()).To(Equal(baseTime.Add(5 * time.Minute)))
+			})
+		})
+
+		When("the callback returns an error", func() {
+			BeforeEach(func() {
+				record002, _ := mockFactory([]byte("002"))
+				_, _ = btl.Upsert(ctx, record002)
+			})
+
+			It("rolls back the sweep", func() {
+				err := btl.Sweep(ctx, baseTime.Add(3*time.Minute), func(record Record) (Record, error) {
+					return nil, errors.New("boom")
+				})
+
+				Expect(err).To(MatchError(ContainSubstring("boom")))
+
+				records, err := btl.All()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(records).To(HaveLen(1))
 			})
 		})
 	})

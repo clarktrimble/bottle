@@ -3,6 +3,7 @@ package bottle_test
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ func TestColSpec(t *testing.T) {
 var _ = Describe("Bottle", func() {
 	var (
 		ctx       context.Context
+		path      string
 		btl       *Bottle
 		record001 Record
 		err       error
@@ -38,7 +40,8 @@ var _ = Describe("Bottle", func() {
 			InfoFunc:  func(ctx context.Context, msg string, kv ...any) {},
 		}
 		record001, _ = mockFactory([]byte("001"))
-		btl, err = New(mockFactory, "unit.db", lgr)
+		path = filepath.Join(GinkgoT().TempDir(), "unit.db")
+		btl, err = New(mockFactory, path, lgr)
 		Expect(err).ToNot(HaveOccurred())
 		err = btl.Flush()
 		Expect(err).ToNot(HaveOccurred())
@@ -46,6 +49,17 @@ var _ = Describe("Bottle", func() {
 
 	AfterEach(func() {
 		btl.Close()
+	})
+
+	Describe("creating a bottle", func() {
+		When("the record factory is nil", func() {
+			It("returns an error", func() {
+				btl, err := New(nil, path, nil)
+
+				Expect(err).To(MatchError("record factory is required"))
+				Expect(btl).To(BeNil())
+			})
+		})
 	})
 
 	Describe("upserting records", func() {
@@ -84,6 +98,20 @@ var _ = Describe("Bottle", func() {
 			})
 		})
 
+		When("the logger is nil", func() {
+			BeforeEach(func() {
+				btl.Close()
+				btl, err = New(mockFactory, path, nil)
+				Expect(err).ToNot(HaveOccurred())
+				_, _ = btl.Upsert(ctx, record001)
+			})
+
+			It("uses a no-op logger", func() {
+				Expect(err).ToNot(HaveOccurred())
+				Expect(created).To(BeFalse())
+			})
+		})
+
 		When("distinct records", func() {
 			BeforeEach(func() {
 				record000, _ := mockFactory([]byte("000"))
@@ -96,6 +124,31 @@ var _ = Describe("Bottle", func() {
 				records, err := btl.All()
 				Expect(err).ToNot(HaveOccurred())
 				Expect(records).To(HaveLen(2))
+			})
+		})
+	})
+
+	Describe("getting records", func() {
+		When("the record exists", func() {
+			BeforeEach(func() {
+				_, _ = btl.Upsert(ctx, record001)
+			})
+
+			It("returns the record", func() {
+				record, err := btl.Get([]byte("test001"))
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(record).ToNot(BeNil())
+				Expect(record.Id()).To(Equal("test001"))
+			})
+		})
+
+		When("the record does not exist", func() {
+			It("returns nil", func() {
+				record, err := btl.Get([]byte("missing"))
+
+				Expect(err).ToNot(HaveOccurred())
+				Expect(record).To(BeNil())
 			})
 		})
 	})

@@ -28,6 +28,7 @@ func tsm(record Record) int64 {
 }
 
 func idx(record Record) []byte {
+	// Todo: consider sortable int64 encoding if pre-epoch timestamps matter.
 	tsBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(tsBytes, uint64(tsm(record)))
 	return append(tsBytes, idb(record)...)

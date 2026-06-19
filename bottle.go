@@ -2,6 +2,7 @@ package bottle
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/pkg/errors"
@@ -21,6 +22,12 @@ type Logger interface {
 	Error(ctx context.Context, msg string, err error, kv ...any)
 }
 
+type noopLogger struct{}
+
+func (noopLogger) Info(context.Context, string, ...any) {}
+
+func (noopLogger) Error(context.Context, string, error, ...any) {}
+
 // Bottle provides bolt ttl'ish methods.
 type Bottle struct {
 	db      *bbolt.DB
@@ -30,6 +37,15 @@ type Bottle struct {
 
 // New creates a Bottle instance.
 func New(factory NewRecord, path string, lgr Logger) (bottle *Bottle, err error) {
+
+	if factory == nil {
+		err = errors.New("record factory is required")
+		return
+	}
+
+	if lgr == nil {
+		lgr = noopLogger{}
+	}
 
 	db, err := bbolt.Open(path, 0600, &bbolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
@@ -44,6 +60,12 @@ func New(factory NewRecord, path string, lgr Logger) (bottle *Bottle, err error)
 	}
 
 	err = bottle.touchBuckets()
+	if err != nil {
+		_ = bottle.Close()
+		bottle = nil
+		return
+	}
+
 	return
 }
 
@@ -91,6 +113,8 @@ func (bottle *Bottle) Upsert(ctx context.Context, record Record) (newRecord bool
 // Expire deletes old records.
 func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (expired []Record, err error) {
 
+	// Todo: decide whether cutoff should be inclusive or strict before.
+
 	err = bottle.db.Update(func(tx *bbolt.Tx) error {
 
 		recordBucket, indexBucket, err := buckets(tx)
@@ -106,6 +130,7 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (expired []R
 
 			data, finished, err := expire(recordBucket, cursor, key, id, before)
 			if err != nil {
+				// Todo: consider returning errors instead of logging and continuing.
 				bottle.logger.Error(ctx, "error expiring record", err)
 				continue
 			}
@@ -115,6 +140,7 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (expired []R
 
 			record, err := bottle.factory(data)
 			if err != nil {
+				// Todo: consider returning errors instead of logging and continuing.
 				bottle.logger.Error(ctx, "error rehydrating expired record", err)
 				continue
 			}
@@ -131,15 +157,34 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (expired []R
 func (bottle *Bottle) Flush() (err error) {
 
 	// Todo: rename ffs
-	// Todo: all within a single tx plz
 
-	err = bottle.deleteBuckets()
-	if err != nil {
-		return
-	}
+	return bottle.db.Update(func(tx *bbolt.Tx) error {
+		err := tx.DeleteBucket([]byte(recordBucketName))
+		if err != nil {
+			err = errors.Wrapf(err, "failed to delete record bucket")
+			return err
+		}
 
-	err = bottle.touchBuckets()
-	return
+		err = tx.DeleteBucket([]byte(indexBucketName))
+		if err != nil {
+			err = errors.Wrapf(err, "failed to delete index bucket")
+			return err
+		}
+
+		_, err = tx.CreateBucketIfNotExists([]byte(recordBucketName))
+		if err != nil {
+			err = errors.Wrapf(err, "failed to create record bucket")
+			return err
+		}
+
+		_, err = tx.CreateBucketIfNotExists([]byte(indexBucketName))
+		if err != nil {
+			err = errors.Wrapf(err, "failed to create index bucket")
+			return err
+		}
+
+		return nil
+	})
 }
 
 // Get gets a record.
@@ -173,7 +218,7 @@ func (bottle *Bottle) All() (records []Record, err error) {
 		cursor := bucket.Cursor()
 		for key, data := cursor.First(); key != nil; key, data = cursor.Next() {
 
-			record, err := bottle.factory(data)
+			record, err := bottle.factory(slices.Clone(data))
 			if err != nil {
 				return err
 			}
@@ -195,7 +240,7 @@ func (bottle *Bottle) get(recordBucket *bbolt.Bucket, idb []byte) (record Record
 		return
 	}
 
-	record, err = bottle.factory(data)
+	record, err = bottle.factory(slices.Clone(data))
 	return
 }
 
@@ -231,11 +276,12 @@ func expire(bucket *bbolt.Bucket, cursor *bbolt.Cursor, key, id []byte, co time.
 		return
 	}
 
-	expired = bucket.Get(id)
-	if expired == nil {
+	data := bucket.Get(id)
+	if data == nil {
 		err = errors.Errorf("no data for expired record with id: %s", id)
 		return
 	}
+	expired = slices.Clone(data)
 
 	err = bucket.Delete(id)
 	if err != nil {
@@ -289,26 +335,6 @@ func (bottle *Bottle) touchBuckets() (err error) {
 		_, err = tx.CreateBucketIfNotExists([]byte(indexBucketName))
 		if err != nil {
 			err = errors.Wrapf(err, "failed to create index bucket")
-			return err
-		}
-
-		return nil
-	})
-}
-
-func (bottle *Bottle) deleteBuckets() (err error) {
-
-	return bottle.db.Update(func(tx *bbolt.Tx) error {
-
-		err := tx.DeleteBucket([]byte(recordBucketName))
-		if err != nil {
-			err = errors.Wrapf(err, "failed to delete record bucket")
-			return err
-		}
-
-		err = tx.DeleteBucket([]byte(indexBucketName))
-		if err != nil {
-			err = errors.Wrapf(err, "failed to delete index bucket")
 			return err
 		}
 

@@ -130,6 +130,7 @@ func (bottle *Bottle) Expire(ctx context.Context, before time.Time) (expired []R
 // Flush recreates buckets, deleting all records.
 func (bottle *Bottle) Flush() (err error) {
 
+	// Todo: rename ffs
 	// Todo: all within a single tx plz
 
 	err = bottle.deleteBuckets()
